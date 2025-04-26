@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, ChangeEvent, useRef } from 'react';
 import { supabase } from '../supabase-client';
 
 interface Task {
   id: number;
   title: string;
   description: string;
+  image_url?: string;
 }
 
 export default function Task() {
@@ -16,66 +17,107 @@ export default function Task() {
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [updatedDescription, setUpdatedDescription] = useState('');
+  const [taski, setTaski] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchTasks = async () => {
     setLoading(true);
-    const { error, data } = await supabase.from('tasks').select('*');
-    if (error) {
-      console.log('Error', error.message);
-    } else {
-      setTasks(data || []);
-    }
+    const { data, error } = await supabase.from('tasks').select('*');
+    if (error) console.log('Fetch Error:', error.message);
+    else setTasks(data || []);
     setLoading(false);
   };
 
-  const deleteTasks = async (id: number) => {
+  const deleteTask = async (id: number) => {
     const { error } = await supabase.from('tasks').delete().eq('id', id);
-    if (error) {
-      console.error('Error', error.message);
-      return;
-    }
-    fetchTasks();
+    if (error) console.error('Delete Error:', error.message);
   };
 
   const updateTask = async (id: number) => {
     if (!updatedDescription.trim()) return;
-
-    const { error } = await supabase
-      .from('tasks')
-      .update({ description: updatedDescription })
-      .eq('id', id);
-
-    if (error) {
-      console.error('Error', error.message);
-      return;
-    }
-
+    const { error } = await supabase.from('tasks').update({ description: updatedDescription }).eq('id', id);
+    if (error) console.error('Update Error:', error.message);
     setEditingId(null);
     setUpdatedDescription('');
-    fetchTasks();
+  };
+
+  const uploadImage = async (file: File): Promise<string | null> => {
+    const filePath = `task-images/${Date.now()}-${file.name}`;
+
+    const { error: uploadError } = await supabase.storage.from('task-images').upload(filePath, file);
+    if (uploadError) {
+      console.error('Upload Error:', uploadError.message);
+      return null;
+    }
+
+    const { data: publicUrlData } = await supabase.storage.from('task-images').getPublicUrl(filePath);
+    return publicUrlData?.publicUrl ?? null;
   };
 
   const handleAddTodo = async () => {
-    if (title && description) {
-      const { error } = await supabase
-        .from('tasks')
-        .insert([{ title, description }]);
+    if (!title.trim() || !description.trim()) {
+      alert('Please fill in both fields.');
+      return;
+    }
 
-      if (error) {
-        console.error('Error adding todo:', error.message);
-        return;
-      }
+    let imageUrl: string | null = null;
+    if (taski) {
+      imageUrl = await uploadImage(taski);
+    }
 
-      setTitle('');
-      setDescription('');
-      fetchTasks();
-    } else {
-      alert('Please fill in both fields');
+    const { error } = await supabase.from('tasks').insert([
+      { title, description, image_url: imageUrl }
+    ]);
+
+    if (error) {
+      console.error('Insert Error:', error.message);
+      return;
+    }
+
+    setTitle('');
+    setDescription('');
+    setTaski(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setTaski(e.target.files[0]);
     }
   };
 
   useEffect(() => {
     fetchTasks();
+  }, []);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('tasks-channel')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'tasks',
+      }, (payload) => {
+        console.log('Realtime change:', payload);
+
+        if (payload.eventType === 'INSERT') {
+          const newTask = payload.new as Task;
+          setTasks((prev) => [...prev, newTask]);
+        }
+        if (payload.eventType === 'DELETE') {
+          const deletedId = payload.old.id as number;
+          setTasks((prev) => prev.filter((task) => task.id !== deletedId));
+        }
+        if (payload.eventType === 'UPDATE') {
+          const updatedTask = payload.new as Task;
+          setTasks((prev) => prev.map((task) => task.id === updatedTask.id ? updatedTask : task));
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   return (
@@ -99,6 +141,14 @@ export default function Task() {
           className="w-full mb-4 px-4 py-2 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400"
         />
 
+        <input
+          type="file"
+          accept="image/*"
+          onChange={handleFileChange}
+          ref={fileInputRef}
+          className="mb-4"
+        />
+
         <button
           onClick={handleAddTodo}
           className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded-xl transition"
@@ -120,6 +170,14 @@ export default function Task() {
                 >
                   <h3 className="text-lg font-semibold text-gray-800">{task.title}</h3>
                   <p className="text-gray-600 mb-3">{task.description}</p>
+
+                  {task.image_url && (
+                    <img
+                      src={task.image_url}
+                      alt="Uploaded task"
+                      className="mb-2 rounded-lg max-h-40 w-auto"
+                    />
+                  )}
 
                   {editingId === task.id ? (
                     <div className="flex flex-col gap-2 mb-2">
@@ -157,7 +215,7 @@ export default function Task() {
                         Edit
                       </button>
                       <button
-                        onClick={() => deleteTasks(task.id)}
+                        onClick={() => deleteTask(task.id)}
                         className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 text-sm rounded-lg"
                       >
                         Delete
